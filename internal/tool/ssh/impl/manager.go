@@ -170,7 +170,9 @@ func RunManager(ctx context.Context, config *SshConfig, locations map[string]str
 	})
 
 	// Create the trace saver.
-	traceDB, err := perfetto.Open(ctx, PerfettoFile)
+	traceDB, err := perfetto.Open(ctx, PerfettoFile, perfetto.DBOptions{
+		MaxTraceBytes: 100 * 1024 * 1024, // 100MB
+	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot open Perfetto database: %w", err)
 	}

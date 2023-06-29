@@ -81,6 +81,8 @@ type replicaCacheKey struct {
 // [1] https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview#
 // [2] https://ui.perfetto.dev/
 type DB struct {
+	opts DBOptions
+
 	// Trace data is stored in a sqlite DB spread across three tables:
 	// (1) traces:           trace data in a Perfetto-UI-compattible JSON format
 	// (2) replica_num:      map from colocation group replica id to a replica
@@ -94,9 +96,19 @@ type DB struct {
 	replicaNumCache *lru.Cache[replicaCacheKey, int]
 }
 
+// DBOptions specifies options for the database.
+type DBOptions struct {
+	// MaxTraceBytes, if non-zero, specifies the maximum size of trace
+	// data stored in DB.
+	//
+	// Once the trace data exceeds this limit, the DB will start deleting
+	// its oldest traces.
+	MaxTraceBytes int64
+}
+
 // Open opens the default trace database on the local machine, which is
 // persisted in the provided file.
-func Open(ctx context.Context, fname string) (*DB, error) {
+func Open(ctx context.Context, fname string, opts DBOptions) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(fname), 0700); err != nil {
 		return nil, err
 	}
@@ -120,14 +132,16 @@ func Open(ctx context.Context, fname string) (*DB, error) {
 	}
 
 	t := &DB{
+		opts:            opts,
 		fname:           fname,
 		db:              db,
 		replicaNumCache: cache,
 	}
 
-	const initTables = `
+	initTables := `
 -- Trace data.
 CREATE TABLE IF NOT EXISTS traces (
+	insertion_time TEXT NOT NULL,
 	app TEXT NOT NULL,
 	version TEXT NOT NULL,
 	events TEXT NOT NULL
@@ -142,6 +156,17 @@ CREATE TABLE IF NOT EXISTS replica_num (
 	PRIMARY KEY(app,version,weavelet_id)
 );
 `
+	if opts.MaxTraceBytes > 0 {
+		initTables += `
+-- Single-row table that stores the total size of all trace data.
+CREATE TABLE IF NOT EXISTS traces_size (
+	id INTEGER PRIMARY KEY CHECK (id = 0),
+	size INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO traces_size VALUES (0, 0);
+`
+	}
+
 	if _, err := t.execDB(ctx, initTables); err != nil {
 		return nil, fmt.Errorf("open trace DB %s: %w", fname, err)
 	}
@@ -164,14 +189,91 @@ func (d *DB) Store(ctx context.Context, app, version string, spans []sdktrace.Re
 }
 
 func (d *DB) storeEncoded(ctx context.Context, app, version string, encoded []byte) error {
-	const stmt = `
-		INSERT INTO traces(app, version, events)
-		VALUES (?,?,?);
-	`
-	_, err := d.execDB(ctx, stmt, app, version, string(encoded))
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelLinearizable})
 	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback errors can be ignored
+
+	// Insert the encoded trace data.
+	const insertStmt = `
+		INSERT INTO traces(insertion_time, app, version, events)
+		VALUES (strftime('%Y-%m-%d %H:%M:%S:%f','now'),?,?,?);
+	`
+	if _, err := tx.ExecContext(ctx, insertStmt, app, version, string(encoded)); err != nil {
 		return fmt.Errorf("write trace to %s: %w", d.fname, err)
 	}
+
+	if d.opts.MaxTraceBytes > 0 {
+		// Update the size of trace data.
+		const updateSizeStmt = `UPDATE traces_size SET size = size + ? WHERE id = 0;`
+		if _, err := tx.ExecContext(ctx, updateSizeStmt, len(encoded)); err != nil {
+			return fmt.Errorf("update trace size in %s: %w", d.fname, err)
+		}
+	}
+
+	// See if we need to garbage-collect oldest traces.
+	if err := d.maybeGC(ctx, tx); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) maybeGC(ctx context.Context, tx *sql.Tx) error {
+	if d.opts.MaxTraceBytes == 0 {
+		return nil
+	}
+
+	// Get the total size of trace data in DB.
+	const sizeQuery = `SELECT size FROM traces_size`
+	rows, err := tx.QueryContext(ctx, sizeQuery)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var totalBytes int64
+	if rows.Next() {
+		if err := rows.Scan(&totalBytes); err != nil {
+			return err
+		}
+	}
+
+	if totalBytes < d.opts.MaxTraceBytes {
+		return nil
+	}
+
+	// Shrink trace data down to MaxTraceBytes / 2, to amortize the
+	// deletion cost.
+	toDeleteBytes := totalBytes - (d.opts.MaxTraceBytes / 2)
+
+	// Compute the trace length for every trace row, in insertion order.
+	const lenQuery = `SELECT rowid, length(events) FROM traces ORDER BY insertion_time`
+	rows, err = tx.QueryContext(ctx, lenQuery)
+	if err != nil {
+		return err
+	}
+
+	// Delete rows until we reach our target.
+	deletedBytes := int64(0)
+	for rows.Next() && deletedBytes < toDeleteBytes {
+		var rowid, len int64
+		if err := rows.Scan(&rowid, &len); err != nil {
+			return err
+		}
+		deletedBytes += len
+		const stmt = `DELETE FROM traces WHERE rowid = ?`
+		if _, err := tx.ExecContext(ctx, stmt, rowid); err != nil {
+			return err
+		}
+	}
+
+	// Update the traces size.
+	const updateSizeStmt = `UPDATE traces_size SET size = size - ? WHERE id = 0;`
+	if _, err := tx.ExecContext(ctx, updateSizeStmt, deletedBytes); err != nil {
+		return fmt.Errorf("update trace size in %s: %w", d.fname, err)
+	}
+
 	return nil
 }
 

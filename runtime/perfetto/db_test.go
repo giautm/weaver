@@ -17,6 +17,7 @@ package perfetto
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ import (
 var now = time.Now()
 
 // storeSpans stores the provided application version's spans in the database.
-func storeSpans(ctx context.Context, t *testing.T, db *DB, app, version string, spans ...sdktrace.ReadOnlySpan) {
+func storeSpans(ctx context.Context, t testing.TB, db *DB, app, version string, spans ...sdktrace.ReadOnlySpan) {
 	if err := db.Store(ctx, app, version, spans); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestStoreFetch(t *testing.T) {
 	// those application versions and validate they are as expected.
 	ctx := context.Background()
 	fname := filepath.Join(t.TempDir(), "tracedb.db_test.db")
-	db, err := Open(ctx, fname)
+	db, err := Open(ctx, fname, DBOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestReplicaNum(t *testing.T) {
 	// get assigned sequential replica numbers, starting with zero.
 	ctx := context.Background()
 	fname := filepath.Join(t.TempDir(), "tracedb.db_test.db")
-	db, err := Open(ctx, fname)
+	db, err := Open(ctx, fname, DBOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,4 +156,120 @@ func TestReplicaNum(t *testing.T) {
 	expect("app2", "v2", "w1", 0)
 	expect("app2", "v2", "w2", 1)
 	expect("app2", "v2", "w3", 2)
+}
+
+func TestMaxTraceBytes(t *testing.T) {
+	ctx := context.Background()
+	const encSize = 1000
+	const maxRows = 100
+	encData := []byte(strings.Repeat("x", encSize))
+
+	fname := filepath.Join(t.TempDir(), "tracedb.db_test.db")
+	db, err := Open(ctx, fname, DBOptions{
+		MaxTraceBytes: int64(encSize * maxRows),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	numRows := func() int64 {
+		const query = `SELECT COUNT(*) FROM traces`
+		rows, err := db.queryDB(ctx, query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			t.Fatal("no rows for query")
+		}
+		var count int64
+		if err := rows.Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+
+	for i := 0; i < 2*maxRows; i++ {
+		if err := db.storeEncoded(ctx, "app", "v0", encData); err != nil {
+			t.Fatal(err)
+		}
+		expected := int64(i + 1)
+		if expected >= maxRows {
+			expected = int64(maxRows/2 + (expected % (maxRows / 2)))
+		}
+		actual := numRows()
+		if expected != actual {
+			t.Fatalf("unexpected number of trace records at insertion #%d: want %d, got %d", i, expected, actual)
+		}
+	}
+}
+
+func BenchmarkStore(b *testing.B) {
+	ctx := context.Background()
+	const encSize = 10000
+	encData := []byte(strings.Repeat("x", encSize))
+	for _, bm := range []struct {
+		name    string
+		limit   bool
+		maxRows int
+	}{
+		{
+			name:    "nolimit_small",
+			maxRows: 10,
+		},
+		{
+			name:    "limit_small",
+			limit:   true,
+			maxRows: 10,
+		},
+		{
+			name:    "nolimit_medium",
+			maxRows: 100,
+		},
+		{
+			name:    "limit_medium",
+			limit:   true,
+			maxRows: 100,
+		},
+		{
+			name:    "nolimit_big",
+			maxRows: 500,
+		},
+		{
+			name:    "limit_big",
+			limit:   true,
+			maxRows: 500,
+		},
+	} {
+		b.Run(bm.name, func(b *testing.B) {
+			fname := filepath.Join(b.TempDir(), "tracedb.db_bench.db")
+			var opts DBOptions
+			if bm.limit {
+				opts.MaxTraceBytes = int64(bm.maxRows) * encSize
+			}
+			db, err := Open(ctx, fname, opts)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() { db.Close() })
+
+			store := func() {
+				if err := db.storeEncoded(ctx, "app", "v0", encData); err != nil {
+					b.Fatal(err)
+				}
+			}
+
+			// Fill up the DB with traces until it's ready for GC
+			// (in the limit case).
+			for i := 0; i < bm.maxRows-1; i++ {
+				store()
+			}
+
+			b.ResetTimer()
+			for n := 0; n < b.N; n++ {
+				store()
+			}
+		})
+	}
 }

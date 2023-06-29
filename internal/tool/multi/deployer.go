@@ -133,7 +133,9 @@ func newDeployer(ctx context.Context, deploymentId string, config *MultiConfig) 
 	}
 
 	// Create the trace saver.
-	traceDB, err := perfetto.Open(ctx, perfettoFile)
+	traceDB, err := perfetto.Open(ctx, perfettoFile, perfetto.DBOptions{
+		MaxTraceBytes: 100 * 1024 * 1024, // 100MB
+	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot open Perfetto database: %w", err)
 	}
