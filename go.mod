@@ -8,12 +8,16 @@ require (
 	github.com/alecthomas/chroma/v2 v2.2.0
 	github.com/fsnotify/fsnotify v1.5.4
 	github.com/go-sql-driver/mysql v1.7.0
+	github.com/goburrow/cache v0.1.4
+	github.com/golang-jwt/jwt v3.2.2+incompatible
 	github.com/google/cel-go v0.12.5
 	github.com/google/go-cmp v0.5.9
 	github.com/google/pprof v0.0.0-20221118152302-e6195bd50e26
 	github.com/google/uuid v1.3.0
 	github.com/hashicorp/golang-lru/v2 v2.0.1
+	github.com/jinzhu/gorm v1.9.16
 	github.com/lightstep/varopt v1.3.0
+	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
 	github.com/yuin/goldmark v1.4.15
 	github.com/yuin/goldmark-highlighting/v2 v2.0.0-20220924101305-151362477c87
@@ -22,10 +26,11 @@ require (
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.7.0
 	go.opentelemetry.io/otel/sdk v1.11.1
 	go.opentelemetry.io/otel/trace v1.13.0
+	golang.org/x/crypto v0.1.0
 	golang.org/x/exp v0.0.0-20230510235704-dd950f8aeaea
 	golang.org/x/image v0.5.0
 	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4
-	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
+	golang.org/x/term v0.1.0
 	golang.org/x/tools v0.2.0
 	google.golang.org/genproto v0.0.0-20221109142239-94d6d90a7d66
 	google.golang.org/protobuf v1.28.1
@@ -41,7 +46,9 @@ require (
 	github.com/felixge/httpsnoop v1.0.3 // indirect
 	github.com/go-logr/logr v1.2.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
+	github.com/lib/pq v1.1.1 // indirect
 	github.com/mattn/go-isatty v0.0.16 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/stoewer/go-strcase v1.2.0 // indirect
